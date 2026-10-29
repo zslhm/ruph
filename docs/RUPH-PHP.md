@@ -373,7 +373,7 @@ Constants: `PHP_URL_SCHEME` (0), `PHP_URL_HOST` (1), `PHP_URL_PORT` (2), `PHP_UR
 | `render` | `render($template [, $data])` | string — render template with data |
 | `response` | `response($status [, $headers [, $body]])` | null — set full response |
 | `http_request` | `http_request($method, $url [, $headers [, $body]])` | string — HTTP client |
-| `ruph_session_start` | `ruph_session_start($id)` | bool — start a basic file-backed session with a required string ID |
+| `ruph_session_start` | `ruph_session_start($id)` | bool — start a file-backed session for this Host. The id is required and should be unique per visitor. The same id on another host is a different session. Files are mode 0600. The cookie is `HttpOnly` and `SameSite=Lax`, and is not marked `Secure`. |
 | `ruph_session_id` | `ruph_session_id()` | string — current ruph session ID |
 | `ruph_session_destroy` | `ruph_session_destroy()` | bool — delete the current ruph session and clear `$_SESSION` |
 

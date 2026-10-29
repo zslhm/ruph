@@ -118,7 +118,12 @@ pub struct WebServer {
     php_error_log: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
     /// Server stats for injecting RUPH_* vars into PHP $_SERVER
     stats: Option<Arc<crate::status::ServerStats>>,
+    /// Maximum accepted request body, in bytes. Larger POST bodies return 413.
+    max_body_size: usize,
 }
+
+/// Default request body limit: 8 MiB.
+pub const DEFAULT_MAX_BODY_SIZE: usize = 8 * 1024 * 1024;
 
 impl WebServer {
     fn php_auto_handled(exec: &PhpExecution) -> bool {
@@ -287,7 +292,7 @@ impl WebServer {
             && embedded_php_processor.is_none()
             && php_processor.is_none()
         {
-            warn!("No PHP processors available. PHP files will be served as static content.");
+            warn!("No PHP processors available. PHP files will return 500.");
         } else {
             let available: Vec<&str> = [
                 ast_php_processor.as_ref().map(|_| "ast"),
@@ -327,7 +332,12 @@ impl WebServer {
             php_processor,
             php_error_log,
             stats,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
         })
+    }
+
+    pub fn set_max_body_size(&mut self, max_body_size: usize) {
+        self.max_body_size = max_body_size;
     }
 
     /// Create a domain-bound stderr handler for PHP error_log() output.
@@ -641,14 +651,40 @@ impl WebServer {
         rr
     }
 
-    /// Handle HTTP web requests using the global-master / vhost-root / deepest-leaf architecture.
+    /// Read a POST body, stopping once it exceeds `max_body_size`.
+    /// `Err(true)` means the body was too large. `Err(false)` means the body could not be read.
+    async fn read_body_limited(&self, mut body: IncomingBody) -> std::result::Result<Bytes, bool> {
+        if let Some(exact) = body.size_hint().exact() {
+            if exact > self.max_body_size as u64 {
+                return Err(true);
+            }
+        }
+        let mut buf = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(_) => return Err(false),
+            };
+            if let Ok(data) = frame.into_data() {
+                if buf.len().saturating_add(data.len()) > self.max_body_size {
+                    return Err(true);
+                }
+                buf.extend_from_slice(&data);
+            }
+        }
+        Ok(Bytes::from(buf))
+    }
+
+    /// Handle HTTP web requests.
     ///
     /// Flow:
     /// 1. Resolve rr_* variables (filesystem pre-resolution)
     /// 2. Run the global master and vhost-root controllers, if present.
     /// 3. Resolve the target.
-    /// 4. For non-PHP targets, optionally run the deepest local leaf `_index.php`.
-    /// 5. Deliver the resolved target directly, or 404.
+    /// 4. For an existing `.php` file, execute that file. Local `_index.php` files do not run.
+    /// 5. Otherwise run every local `_index.php` below the vhost root, parent before child.
+    ///    All but the deepest are controllers. The deepest is the leaf.
+    /// 6. Deliver the resolved target directly, or 404.
     pub async fn handle_request(
         &self,
         req: Request<IncomingBody>,
@@ -723,13 +759,17 @@ impl WebServer {
         let query_string = parts.uri.query().unwrap_or("").to_string();
         let query_params = self.parse_query_string(&query_string);
         let body_bytes = if method == Method::POST {
-            let body_bytes = match body.collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => {
-                    return Ok(self.error_response(StatusCode::BAD_REQUEST, "Invalid request body"))
+            match self.read_body_limited(body).await {
+                Ok(bytes) => bytes,
+                Err(too_large) => {
+                    let (status, message) = if too_large {
+                        (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large")
+                    } else {
+                        (StatusCode::BAD_REQUEST, "Invalid request body")
+                    };
+                    return Ok(self.error_response(status, message));
                 }
-            };
-            body_bytes
+            }
         } else {
             Bytes::new()
         };
@@ -1148,8 +1188,11 @@ impl WebServer {
             && self.embedded_php_processor.is_none()
             && self.php_processor.is_none()
         {
-            warn!("No PHP processors available, serving PHP file as static content");
-            return self.serve_static_file(template_path).await;
+            warn!("No PHP processors available; refusing to serve PHP source");
+            return Ok(self.error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PHP processor is not available",
+            ));
         }
 
         // cgi mode: use streaming PHP execution so SSE and header() work correctly

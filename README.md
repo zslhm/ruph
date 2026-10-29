@@ -1,38 +1,101 @@
 # ruph — Rust + PHP
 
-A single-binary web server with built-in PHP scripting. No PHP installation required.
+A single-binary web server with a built-in PHP interpreter. No PHP installation required.
 
-ruph includes a native PHP interpreter powered by tree-sitter, giving you PHP's familiar syntax and templating for web sites and apps — all compiled into one cross-platform binary. For advanced use cases, ruph can optionally use an external PHP binary as a fallback.
+ruph serves files directly, and runs PHP only where a directory controller asks for it.
 
-If you just want to get a site running quickly, start with [QUICKSTART.md](QUICKSTART.md).
+- **Directory controllers.** `_index.php` runs for requests in that directory and below. It is a controller, and ruph does not serve it as a URL.
+- **Cascade.** Every `_index.php` from the server root down to the request runs, parent before child. A controller that sends output, redirects, returns, or exits ends the request. The deepest file is the leaf: `return true` lets ruph deliver the file.
+- **Rust delivers the file.** Static files and directory indexes are served by ruph when the cascade passes through. An existing `.php` file runs after the server-wide and vhost controllers; the local cascade does not wrap it.
+- **Automatic TLS.** ruph issues and renews certificates, including wildcards, with a built-in ACME client and embedded DNS server. Port 80 stays closed.
+- **One binary.** The PHP interpreter is compiled in, using tree-sitter. An external `php-cgi` is optional when a site needs full PHP.
 
 ## Quick Start
 
+Point ruph at the folder that holds the site. That folder is the docroot. ruph serves the files in it, and runs `_index.php` only where you add one.
+
 ```bash
-# Serve a directory — that's it
 ./ruph /var/www/mysite
+```
 
-# With TLS
+With HTTPS:
+
+```bash
 ./ruph /var/www/mysite --tls
+```
 
-# With a config file
+With a config file:
+
+```bash
 ./ruph -c ruph.ini /var/www/mysite
 ```
 
-Create a `_index.php` in your docroot and you have a PHP-powered site:
+Running `./ruph` with no arguments prints help.
 
-```php
-<?php
-// _index.php — runs for every request
-if ($_SERVER['REQUEST_URI'] === '/') {
-    readfile('./index.html');
-} else {
-    http_response_code(404);
-    echo "Not found";
-}
+### Serve a page
+
+```text
+/var/www/mysite/
+  index.html
 ```
 
-Running `./ruph` with no arguments prints help.
+A request for `/` serves `index.html`. Add `_index.php` later, and only in the folders where you want a rule: a redirect, an access check, a custom 404, or a log line. If that file stays silent, ruph serves the file. If it sends output, changes the status, redirects, or exits, that is the response.
+
+### One file for the whole site
+
+```text
+/var/www/mysite/
+  _index.php
+  index.html
+  about.html
+```
+
+### One folder
+
+```text
+/var/www/mysite/
+  _index.php
+  blog/
+    _index.php
+    post1.html
+```
+
+Every `_index.php` from the site root down to that folder runs, parent before child. A parent that sends output, redirects, returns, or exits ends the request. The deepest `_index.php` is the leaf: it can handle the request, or stay silent and let ruph serve the file.
+
+[LATEST_CASCADE.md](LATEST_CASCADE.md) is the short map of that order. It shows which `_index.php` runs for a URL such as `https://example.com/a/b/page`, which file is the leaf, and what stops the chain.
+
+An existing `.php` file is the exception. The site-wide `_index.php` still runs, then that file runs. `_index.php` files in between do not. A file named `_index.php` is never itself a URL.
+
+```text
+/var/www/mysite/
+  contact.php
+```
+
+A request for `/contact.php` runs that file.
+
+### More than one site
+
+```ini
+[https.example.com]
+docroot = /var/www/example.com
+
+[https.other.org]
+docroot = /var/www/other.org
+```
+
+Each site has its own folder and its own `_index.php`.
+
+### See the log
+
+```bash
+./ruph /var/www/mysite --log-console
+./ruph /var/www/mysite --log-level debug --log-console
+./ruph /var/www/mysite --stdoutstats 5
+```
+
+Levels are `error`, `warn`, `info` (default), `debug`, and `trace`. Without `--log-console`, a chosen log level goes to the error log file. `--stdoutstats 5` prints server stats every five seconds.
+
+The exact request contract is in [docs/REQUESTS.md](docs/REQUESTS.md). Config keys are in [docs/RUPH_INI.md](docs/RUPH_INI.md). The built-in PHP language is in [docs/RUPH-PHP.md](docs/RUPH-PHP.md).
 
 ## How It Works
 
@@ -48,40 +111,49 @@ Request arrives
     ├── Execute global /_index.php (master), if present
     ├── Execute vhost-root /_index.php, if present
     │
-    ├── Existing .php file target → execute it
-    ├── Existing static/index target + deepest local leaf _index.php
+    ├── Existing .php file → execute it (local _index.php files do not run)
+    ├── Any other target → run every local _index.php below the vhost root,
+    │   parent before child
+    │   ├── intermediate _index.php files are controllers
+    │   ├── the deepest _index.php is the leaf
     │   ├── leaf handles → DONE
-    │   └── leaf passes through → Rust delivers target
+    │   └── leaf passes through → Rust delivers the target, or 500 if none
     │
-    ├── Existing static/index target, no leaf → Rust delivers target
-    └── Missing path → deepest local leaf handles, or 404
+    └── No local _index.php and no file → 404
 ```
 
 ### _index.php Architecture
 
-There are up to **three** controller opportunities per request:
+Controllers run top to bottom. A controller that sends output, sets a redirect, returns, or exits ends the request.
 
 1. **Global master** (`/<server-root>/_index.php`)
 2. **Vhost-root controller** (`/<vhost-docroot>/_index.php`)
-3. **Deepest local leaf** (`/subdir/_index.php`)
+3. **Each intermediate** `_index.php` below the vhost root, parent before child
+4. **Deepest local leaf** (`/subdir/_index.php`)
 
-Only the deepest local leaf runs. Intermediate `_index.php` files do not form a chain.
+An existing `.php` file runs after the global master and the vhost-root controller. Intermediate and leaf `_index.php` files do not run for that request.
 
 The intended model is:
 - global master = server-wide policy
 - vhost-root `_index.php` = site-wide policy
+- intermediate `_index.php` files = policy for that directory and below
 - deepest local leaf `_index.php` = local interception/routing
 - otherwise Rust serves the resolved target directly
 
-See [REQUESTS.md](REQUESTS.md) for the exact request flow and controller semantics.
+See [LATEST_CASCADE.md](LATEST_CASCADE.md) for the controller order on one URL, and [docs/REQUESTS.md](docs/REQUESTS.md) for the full request contract.
 
 ```php
 <?php
-// Master _index.php — global auth, then delegate
-ruph_session_start($_COOKIE['RUPHSESSID'] ?? 'guest');
+// Master _index.php — one session per visitor, then delegate.
+// Pass a unique id. A shared constant such as "guest" is one shared session.
+$sid = $_COOKIE['RUPHSESSID'] ?? '';
+if ($sid === '') {
+    $sid = md5((string) microtime(true) . (string) mt_rand());
+}
+ruph_session_start($sid);
 if (!authenticated()) { http_response_code(401); exit; }
 
-// Let the leaf _index.php handle it, or ruph serves static
+// Let the later _index.php files handle it, or ruph serves static
 ```
 
 ### Pre-resolved Request Info
@@ -100,7 +172,7 @@ ruph resolves the filesystem **before** PHP runs and sets these `$_SERVER` keys:
 
 Plus all standard `$_SERVER` keys: `REQUEST_URI`, `REQUEST_METHOD`, `QUERY_STRING`, `HTTP_HOST`, `DOCUMENT_ROOT`, `SCRIPT_FILENAME`, `PHP_SELF`, `PATH_INFO`, and all `HTTP_*` headers.
 
-For full details on request flow, controller behavior, and `rr_*` variables, see [REQUESTS.md](REQUESTS.md).
+For full details on request flow, controller behavior, and `rr_*` variables, see [docs/REQUESTS.md](docs/REQUESTS.md).
 
 ## Ruph PHP Reference
 
@@ -183,7 +255,7 @@ ruph's built-in interpreter runs PHP natively in Rust — no external PHP binary
 | `response($status, $headers, $body)` | Set response status, headers, and body in one call |
 | `http_request($method, $url, $headers, $body)` | Make an HTTP request from PHP |
 | `file_get_contents($url)` | Works with both local files and HTTP URLs |
-| `ruph_session_start($id)` | Start a basic file-backed session using a required string session ID |
+| `ruph_session_start($id)` | Start a file-backed session for this Host. The id is required and should be unique per visitor. Files are mode 0600 under the system temp directory, one directory per host, so the same id on two hosts does not share state. The `RUPHSESSID` cookie is `HttpOnly` and `SameSite=Lax`. It is not marked `Secure`. |
 | `ruph_session_id()` | Return the current ruph session ID |
 | `ruph_session_destroy()` | Delete the current ruph session and clear `$_SESSION` |
 
@@ -232,15 +304,19 @@ Arguments:
   [DOCROOT]  Root directory to serve
 
 Options:
-      --bind-https <ADDR>      HTTPS bind address (default from config)
-      --bind-http <ADDR>       Optional plain-HTTP bind address
-  -c, --config <FILE>          Configuration file (INI format)
-      --new-cert <NEW_CERT>    Generate ACME/Let's Encrypt cert: email@domain,example.com
-      --list-certs             List known certificates and exit
-      --tls                    Enable TLS (uses certs from ~/.ruph/ssl)
-      --php-binary <BINARY>    PHP binary for cgi mode (overrides config)
-      --log-level <LOG_LEVEL>  Log level: error, warn, info, debug, trace [default: info]
-  -h, --help                   Print help
+      --bind-https <ADDR>         HTTPS bind address, e.g. 0.0.0.0:8082 (alias: --bind)
+      --bind-http <ADDR>          Plain-HTTP bind address, e.g. 0.0.0.0:80 (alias: --http-bind)
+  -c, --config <FILE>             Configuration file (INI format)
+      --new-cert <EMAIL,DOMAINS>  Issue an ACME certificate
+      --refresh-ssl               Refresh certificates expiring within 30 days
+      --list-certs                List known certificates and exit
+      --tls                       Enable TLS (uses certs from ~/.ruph/ssl)
+      --php-binary <BINARY>       PHP binary for cgi mode (overrides config)
+      --log-level <LEVEL>         error, warn, info, debug, trace
+      --log-console               Also log to stdout
+      --stdoutstats <SECONDS>     Print server stats to stdout every N seconds (0 = off)
+  -h, --help                      Print help
+  -V, --version                   Print version
 ```
 
 ## Configuration (INI)
@@ -259,6 +335,8 @@ ruph looks for `ruph.ini` in these locations (first match wins):
 bind = 0.0.0.0:8082
 log_level = info
 tls = false
+; Reject POST bodies larger than this. Plain bytes, or a K/M/G suffix. Default: 8M.
+;max_body_size = 8M
 
 [http]
 docroot = /var/www/html
@@ -312,3 +390,9 @@ cargo build --release --target x86_64-unknown-linux-musl
 ```bash
 cargo test
 ```
+
+## License
+
+ruph is free software, licensed under the GNU General Public License v3.0 only. See [LICENSE](LICENSE).
+
+Copyright (C) 2026 zaunere

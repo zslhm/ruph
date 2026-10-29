@@ -1,5 +1,9 @@
 target
 .claude
+_OTHER
+ruph.ini
+*.log
+*.db
 
 
 

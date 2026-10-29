@@ -226,6 +226,21 @@ pub fn format_stats_line(stats: &ServerStats) -> String {
     )
 }
 
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn render_status_page(stats: &ServerStats, viewer_ip: IpAddr, vhost: &str) -> String {
     let uptime = stats.uptime();
     let days = uptime.as_secs() / 86400;
@@ -246,13 +261,16 @@ pub fn render_status_page(stats: &ServerStats, viewer_ip: IpAddr, vhost: &str) -
         .map(|(ip, count)| {
             format!(
                 "            <tr><td>{}</td><td class=\"num\">{}</td></tr>",
-                ip, count
+                html_escape(&ip.to_string()),
+                count
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let vhost = html_escape(vhost);
+    let viewer_ip = html_escape(&viewer_ip.to_string());
 
     format!(
         r#"<!DOCTYPE html>

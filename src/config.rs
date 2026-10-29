@@ -81,6 +81,9 @@ pub struct Config {
     // Rate limit window in seconds (default 2)
     pub rate_window: u64,
 
+    /// Maximum request body size in bytes (default 8 MiB).
+    pub max_body_size: usize,
+
     // Full request logging to SQLite (path to .db file, None = disabled)
     pub log_full: Option<String>,
 
@@ -131,6 +134,7 @@ impl Default for Config {
             ssl_dir: None,
             status_page: None,
             rate_window: 2,
+            max_body_size: 8 * 1024 * 1024,
             log_full: None,
             trailhead_api_url: None,
             trailhead_api_key: None,
@@ -207,6 +211,11 @@ impl Config {
         if let Some(v) = ini.get("server", "rate_window") {
             if let Ok(n) = v.trim().parse::<u64>() {
                 config.rate_window = n;
+            }
+        }
+        if let Some(v) = ini.get("server", "max_body_size") {
+            if let Some(n) = parse_byte_size(&v) {
+                config.max_body_size = n;
             }
         }
         if let Some(v) = ini.get("server", "log_full") {
@@ -549,6 +558,25 @@ impl Config {
         }
         None
     }
+}
+
+/// Parse a byte size: a plain integer, or an integer with a K, M, or G suffix.
+fn parse_byte_size(raw: &str) -> Option<usize> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = if let Some(n) = s.strip_suffix(['K', 'k']) {
+        (n, 1024u64)
+    } else if let Some(n) = s.strip_suffix(['M', 'm']) {
+        (n, 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix(['G', 'g']) {
+        (n, 1024 * 1024 * 1024)
+    } else {
+        (s, 1u64)
+    };
+    let n: u64 = num.trim().parse().ok()?;
+    usize::try_from(n.checked_mul(mult)?).ok()
 }
 
 fn parse_bool(s: &str) -> bool {

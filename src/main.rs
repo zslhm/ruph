@@ -644,7 +644,7 @@ async fn main() -> Result<()> {
 
     let server_stats = Arc::new(status::ServerStats::new(cfg.rate_window));
 
-    let web_server = Arc::new(WebServer::new(
+    let mut web_server = WebServer::new(
         root_dir,
         domain_roots,
         prefix_roots,
@@ -653,11 +653,13 @@ async fn main() -> Result<()> {
         php_binary.clone(),
         php_error_log.clone(),
         Some(server_stats.clone()),
-    )?);
+    )?;
+    web_server.set_max_body_size(cfg.max_body_size);
+    let web_server = Arc::new(web_server);
 
     let status_page_path: Option<String> = cfg.status_page.clone();
     if let Some(ref sp) = status_page_path {
-        eprintln!("  status page: {}", sp);
+        eprintln!("  status page: {} (loopback clients only)", sp);
     }
 
     let listener = TcpListener::bind(addr).await?;
@@ -693,16 +695,20 @@ async fn main() -> Result<()> {
             web_server.root_dir.clone()
         };
         eprintln!("  http docroot: {}", http_root.display());
-        Some(Arc::new(WebServer::new(
-            http_root,
-            std::collections::HashMap::new(), // No per-domain roots for HTTP
-            Vec::new(),                       // No prefix roots for HTTP
-            cfg.index_files.clone(),
-            cfg.php_mode.clone(),
-            php_binary,
-            php_error_log,
-            Some(server_stats.clone()),
-        )?))
+        Some({
+            let mut http_server = WebServer::new(
+                http_root,
+                std::collections::HashMap::new(), // No per-domain roots for HTTP
+                Vec::new(),                       // No prefix roots for HTTP
+                cfg.index_files.clone(),
+                cfg.php_mode.clone(),
+                php_binary,
+                php_error_log,
+                Some(server_stats.clone()),
+            )?;
+            http_server.set_max_body_size(cfg.max_body_size);
+            Arc::new(http_server)
+        })
     } else {
         None
     };
@@ -1055,7 +1061,7 @@ async fn handle_request(
 
     // Status page intercept — before virtual host routing
     if let Some(ref sp) = status_page_path {
-        if uri.path() == sp.as_str() {
+        if uri.path() == sp.as_str() && remote_addr.ip().is_loopback() {
             let html = status::render_status_page(&stats, remote_addr.ip(), &domain);
             let response = Response::builder()
                 .status(StatusCode::OK)

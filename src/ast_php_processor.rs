@@ -5445,20 +5445,73 @@ impl AstPhpProcessor {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     }
 
-    fn session_file_path(id: &str) -> PathBuf {
+    /// Directory name for a Host header. One path component, so two vhosts
+    /// cannot share a session file by using the same id.
+    fn session_host_key(host: &str) -> String {
+        let host = host.split(':').next().unwrap_or(host).trim();
+        let mut key: String = host
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        while key.contains("..") {
+            key = key.replace("..", "_");
+        }
+        key = key.trim_matches('.').to_string();
+        if key.is_empty() { "_default".to_string() } else { key }
+    }
+
+    fn session_file_path(host: &str, id: &str) -> PathBuf {
         std::env::temp_dir()
             .join("ruph_sessions")
+            .join(Self::session_host_key(host))
             .join(format!("sess_{}", id))
     }
 
-    async fn acquire_session_lock(id: &str) -> OwnedMutexGuard<()> {
+    fn session_lock_key(host: &str, id: &str) -> String {
+        format!("{}\n{}", Self::session_host_key(host), id)
+    }
+
+    /// Session directories are 0700 and session files are 0600.
+    async fn write_private_file(path: &Path, raw: &str) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                if let Some(root) = parent.parent() {
+                    let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700));
+                }
+            }
+        }
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let mut file = opts.open(path).await?;
+        file.write_all(raw.as_bytes()).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    async fn acquire_session_lock(key: &str) -> OwnedMutexGuard<()> {
         let lock = {
             let mut locks = SESSION_LOCKS
                 .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
                 .lock()
                 .unwrap();
             locks
-                .entry(id.to_string())
+                .entry(key.to_string())
                 .or_insert_with(|| Arc::new(AsyncMutex::new(())))
                 .clone()
         };
@@ -5485,9 +5538,11 @@ impl AstPhpProcessor {
 
         self.finalize_session().await;
         self.session_lock = None;
-        self.session_lock = Some(Self::acquire_session_lock(id).await);
+        self.session_lock = Some(
+            Self::acquire_session_lock(&Self::session_lock_key(&self.request_domain, id)).await,
+        );
 
-        let path = Self::session_file_path(id);
+        let path = Self::session_file_path(&self.request_domain, id);
         let mut session = HashMap::new();
         if let Ok(raw) = fs::read_to_string(&path).await {
             match serde_json::from_str::<HashMap<String, String>>(&raw) {
@@ -5508,7 +5563,7 @@ impl AstPhpProcessor {
 
     async fn ruph_session_destroy(&mut self) -> Result<PhpValue> {
         if let Some(id) = self.session_id.clone() {
-            let path = Self::session_file_path(&id);
+            let path = Self::session_file_path(&self.request_domain, &id);
             if let Err(e) = fs::remove_file(&path).await {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     self.log_error(&format!("Failed to remove ruph session {}: {}", id, e));
@@ -5538,14 +5593,7 @@ impl AstPhpProcessor {
             return;
         }
 
-        let path = Self::session_file_path(&id);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent).await {
-                self.log_error(&format!("Failed to create ruph session directory: {}", e));
-                self.session_lock = None;
-                return;
-            }
-        }
+        let path = Self::session_file_path(&self.request_domain, &id);
 
         let session = self
             .superglobals
@@ -5554,7 +5602,7 @@ impl AstPhpProcessor {
             .unwrap_or_default();
         match serde_json::to_string(&session) {
             Ok(raw) => {
-                if let Err(e) = fs::write(&path, raw).await {
+                if let Err(e) = Self::write_private_file(&path, &raw).await {
                     self.log_error(&format!("Failed to write ruph session {}: {}", id, e));
                 }
             }
@@ -7135,7 +7183,7 @@ echo 'hi';
     #[tokio::test]
     async fn test_ruph_session_persists_session_superglobal() {
         let session_id = format!("test_{}_ast_session", std::process::id());
-        let session_path = AstPhpProcessor::session_file_path(&session_id);
+        let session_path = AstPhpProcessor::session_file_path("", &session_id);
         let _ = std::fs::remove_file(&session_path);
 
         let get_params = HashMap::new();
@@ -7188,6 +7236,23 @@ echo 'hi';
             .await
             .unwrap();
         assert_eq!(result.body, "Alice");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&session_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "session file should be readable only by the server user");
+            let dir_mode = std::fs::metadata(session_path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700, "session directory should not be world-accessible");
+        }
+
+        let other_host = AstPhpProcessor::session_file_path("other.example", &session_id);
+        assert_ne!(other_host, session_path);
+        assert!(!other_host.exists());
 
         let _ = std::fs::remove_file(&session_path);
     }

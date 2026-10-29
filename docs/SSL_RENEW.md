@@ -12,11 +12,11 @@ ruph has a built-in ACME client with an embedded DNS server for DNS-01 challenge
 
 ### 1. DNS Zone Delegation
 
-Choose a subdomain for ruph's DNS zone (e.g., `acme.libzsl.com`). Add these two records at the parent domain's DNS provider:
+Choose a subdomain for ruph's DNS zone (e.g., `acme.example.com`). Add these two records at the parent domain's DNS provider:
 
 ```
-acme.libzsl.com.  A   <your-server-ip>
-acme.libzsl.com.  NS  acme.libzsl.com.
+acme.example.com.  A   <your-server-ip>
+acme.example.com.  NS  acme.example.com.
 ```
 
 ### 2. Configuration
@@ -25,8 +25,8 @@ Create or edit `~/.ruph/ruph.ini`:
 
 ```ini
 [acme]
-zone = acme.libzsl.com
-email = hostmaster@libzsl.com
+zone = acme.example.com
+email = hostmaster@example.com
 ```
 
 Optional: set `dns_bind = 0.0.0.0:53` (this is the default).
@@ -42,7 +42,7 @@ ruph --new-cert example.com
 On first run for a new domain, ruph prints the CNAME record to add:
 
 ```
-_acme-challenge.example.com  CNAME  <uuid>.acme.libzsl.com
+_acme-challenge.example.com  CNAME  <uuid>.acme.example.com
 ```
 
 Add this CNAME at whatever DNS provider manages `example.com`. This is a one-time step — the UUID is stable and persisted in `~/.ruph/ssl/acme_domains.json`.
@@ -58,7 +58,7 @@ ruph --new-cert "*.example.com"
 The CNAME goes on the base domain:
 
 ```
-_acme-challenge.example.com  CNAME  <uuid>.acme.libzsl.com
+_acme-challenge.example.com  CNAME  <uuid>.acme.example.com
 ```
 
 Wildcards and bare domains share the same CNAME since both validate via `_acme-challenge.<base>`.

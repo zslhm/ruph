@@ -2,6 +2,9 @@
 name = "ruph"
 version = "0.1.0"
 edition = "2021"
+description = "Single-binary web server with a built-in PHP interpreter"
+license = "GPL-3.0-only"
+authors = ["zaunere <hans@zsl.ai>"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

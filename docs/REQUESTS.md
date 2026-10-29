@@ -15,12 +15,13 @@ Request flow:
 5. Run the global master `/_index.php` from the server root, if present.
 6. Run the effective vhost root `/_index.php`, if present and different from the global master.
 7. Resolve the request target.
-8. If the target is an existing `.php` file, execute that file directly.
-9. Otherwise, if a deepest local leaf `_index.php` exists below the vhost root, execute that single leaf.
-10. If the leaf passes through, deliver the resolved file/index directly.
-11. If nothing resolves, return 404.
+8. If the target is an existing `.php` file, execute that file directly. Local `_index.php` files do not run.
+9. Otherwise, run every `_index.php` below the vhost root, parent before child. All but the deepest are controllers. The deepest is the leaf.
+10. If a controller sends output, redirects, returns, or exits, stop. The leaf's `return true` passes through.
+11. If the leaf passes through, deliver the resolved file or index directly.
+12. If nothing resolves, return 404. A leaf that passes through with no file to deliver returns 500.
 
-Only one local leaf `_index.php` ever runs.
+POST bodies larger than `max_body_size` (default 8 MiB) are rejected with 413 before PHP runs. If no PHP processor is available, a `.php` target returns 500. ruph does not send the PHP source.
 
 ## 1) Host Resolution and Docroot Selection
 
@@ -76,19 +77,20 @@ In addition to the standard CGI variables (`REQUEST_URI`, `REQUEST_METHOD`, `HTT
 | `RUPH_ACTIVE_CONNECTIONS` | Current open TCP connections |
 | `RUPH_UPTIME` | Server uptime in seconds |
 
-These are available in all three controller layers and in directly-executed PHP files. They enable PHP-side rate limiting without external dependencies — for example, checking `RUPH_IP_HITS_WINDOW > 30` to return 429.
+These are available in every controller, including intermediate `_index.php` files, and in directly-executed PHP files. They enable PHP-side rate limiting without external dependencies — for example, checking `RUPH_IP_HITS_WINDOW > 30` to return 429.
 
 ## 3) Status Page Intercept
 
-If `status_page` is configured (e.g. `/status`), requests matching that exact path are handled before any PHP runs. The status page returns an HTML dashboard with live server metrics (active connections, QPS, top IPs, uptime). This intercept cannot be overridden by `_index.php`.
+If `status_page` is configured (e.g. `/status`), requests matching that exact path from a loopback address (`127.0.0.1` or `::1`) are handled before any PHP runs. Other clients do not see the status page; their request continues through normal routing. The page is an HTML dashboard of live server metrics (active connections, QPS, recent client IPs, uptime). It is not authenticated. This intercept cannot be overridden by `_index.php`. Host and IP values are HTML-escaped.
 
 ## 4) Controller Layers
 
-There are up to three controller opportunities per request:
+Controllers run top to bottom:
 
 1. Global master `/_index.php`
 2. Vhost-root `/_index.php`
-3. Deepest local leaf `_index.php`
+3. Each intermediate `_index.php` below the vhost root, parent before child
+4. Deepest local leaf `_index.php`
 
 ### Global master
 
@@ -111,17 +113,19 @@ It runs after the global master if present and if it is not the same file.
 
 It uses the same stopping behavior as the global master.
 
-### Deepest local leaf
+### Intermediate controllers and the deepest local leaf
 
-This is the deepest `_index.php` below the vhost root in the relevant directory tree.
+For anything that is not an existing `.php` file, ruph walks from the vhost root down to the directory that owns the request and runs every `_index.php` it finds.
 
 Examples:
 
-- `/assets/app.css` => leaf search uses the containing directory of `app.css`
-- `/users/` => leaf search uses `/users`
-- `/missing/path` => leaf search uses the deepest existing directory on disk
+- `/assets/app.css` => directories are `/assets`
+- `/users/admin/profile.html` => `/users`, then `/users/admin`
+- `/missing/path` => the deepest existing directory on disk
 
-Only this single deepest leaf runs. Intermediate `_index.php` files do not form a chain.
+Every file except the last one is a controller and uses the same stop rules as the global master. The last file is the leaf.
+
+`rr_leaf_idx` still names only that deepest file. It does not list the intermediates.
 
 Leaf behavior:
 
@@ -147,7 +151,7 @@ If the literal request path exists and is a file:
 - `.php` => execute that file directly as PHP
 - anything else => treat as a static file target
 
-Explicit existing `.php` files do not get wrapped by the local leaf `_index.php`.
+Explicit existing `.php` files do not run intermediate or leaf `_index.php` files. The global master and vhost-root controller still run first.
 
 ### Existing directory
 
@@ -162,15 +166,15 @@ Once the URL has a trailing slash, the directory is resolved:
 
 `_index.php` is never selected as a directory index because it has already been handled as a controller. This means a directory with both `_index.php` and `index.html` will serve `index.html` automatically when the controller passes through.
 
-The deepest local leaf may intercept directory requests before the resolved index is delivered.
+The local `_index.php` chain may intercept directory requests before the resolved index is delivered.
 
 ### Missing path
 
 If the literal request path does not exist:
 
 - no file or directory target exists
-- the deepest local leaf gets one chance to handle it
-- if there is no such leaf, return 404
+- the local `_index.php` chain runs, and the deepest leaf is expected to finalize the response
+- if there is no such chain, return 404
 
 ## 6) Delivery Rules
 
@@ -182,8 +186,9 @@ If processing reaches final delivery:
 
 This preserves the fast path:
 
-- existing static files are served directly unless a relevant leaf `_index.php` chooses to intercept
+- existing static files are served directly unless a `_index.php` on the path chooses to intercept
 - existing `.php` files execute as PHP
+- if no PHP processor can be loaded, `.php` requests return 500 instead of the file source
 
 ## 7) HEAD / GET / POST
 
@@ -193,7 +198,7 @@ Follows the full controller + target-resolution flow above.
 
 ### POST
 
-Follows the same flow as GET, except parsed form data is available to PHP.
+Follows the same flow as GET, except parsed form data is available to PHP. A body larger than `max_body_size` returns 413 and does not run PHP.
 
 ### HEAD
 
@@ -206,6 +211,7 @@ The intended mental model is:
 
 - global master = server-wide policy
 - vhost-root `_index.php` = site-wide policy for one vhost
+- intermediate `_index.php` files = policy for that directory and below
 - deepest local leaf `_index.php` = local interception/routing
 - otherwise ruph serves the resolved file directly
 

@@ -15,7 +15,7 @@ Override with `--config <path>` to use a specific file.
 
 On startup, ruph prints which config it loaded:
 ```
-config: /var/www/live/ruph_root/ruph.ini
+config: /var/www/example.com/ruph.ini
 ```
 
 ## Sections
@@ -32,9 +32,10 @@ config: /var/www/live/ruph_root/ruph.ini
 | `error_log` | — | Default error log file path (PHP errors, AST warnings) |
 | `index_files` | `_index.php,index.html,index.htm` | Comma-separated index file names |
 | `docroot` | — | Default document root |
-| `status_page` | — | Path for status endpoint (e.g. `/status`) |
+| `status_page` | — | Path for the status endpoint (e.g. `/status`). Served only to loopback clients. Lists recent client IPs and is not authenticated. |
 | `rate_window` | `2` | Sliding window in seconds for per-IP rate limiting |
-| `log_full` | — | Path to SQLite DB for full request logging |
+| `max_body_size` | `8M` | Maximum POST body. A plain byte count, or an integer with a `K`, `M`, or `G` suffix. Larger bodies return 413. |
+| `log_full` | — | Path to a SQLite DB for full request logging. Rows include the `Cookie` and `Authorization` headers. |
 
 ### [server.https] — HTTPS Listener
 
@@ -67,7 +68,7 @@ config: /var/www/live/ruph_root/ruph.ini
 
 ### [trailhead] — Remote Log Ingestion
 
-Ships full request records as NDJSON to the Trailhead API. Batches up to 400 events, flushing every 5 seconds. Requires both `api_url` and `api_key` to enable.
+Ships full request records as NDJSON to the Trailhead API, including the `Cookie` and `Authorization` headers. Batches up to 400 events, flushing every 5 seconds. Requires both `api_url` and `api_key` to enable.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -91,7 +92,7 @@ All HTTP requests that don't match a specific domain use this docroot.
 
 ```ini
 [http.*]
-docroot = /var/www/live/ruph_root/ruph_http
+docroot = /var/www/http
 ```
 
 ### [https.*] — Default HTTPS Docroot
@@ -126,12 +127,12 @@ trailhead_owner = example
 
 ### Prefix Matching
 
-Section names without a dot in the domain part are treated as prefix matches. For example, `[https.www]` matches any host starting with `www` (e.g. `www.example.com`, `www.nyphp.org`).
+Section names without a dot in the domain part are treated as prefix matches. For example, `[https.www]` matches any host starting with `www` followed by a dot (e.g. `www.example.com`, `www.example.org`).
 
 ```ini
 ;; Redirect all www.* to HTTPS without www
 [https.www]
-docroot = /var/www/live/ruph_root/ruph_http
+docroot = /var/www/http
 ```
 
 ### Comma-Separated Domains
@@ -139,8 +140,8 @@ docroot = /var/www/live/ruph_root/ruph_http
 Multiple domains can share the same docroot:
 
 ```ini
-[https.junkometer.com,https.junkmeter.com]
-docroot = /var/www/live/ruph_root/junkometer.com
+[https.example.com,https.example.org]
+docroot = /var/www/example.com
 ```
 
 ## Full Example
@@ -148,9 +149,10 @@ docroot = /var/www/live/ruph_root/junkometer.com
 ```ini
 ;; Global settings
 [server]
-access_log = /var/www/live/ruph_logs/ruph.log
-error_log = /var/www/live/ruph_logs/ruph_error.log
-log_full = /var/www/live/ruph_logs/requests.db
+access_log = /var/log/ruph/ruph.log
+error_log = /var/log/ruph/ruph_error.log
+log_full = /var/log/ruph/requests.db
+max_body_size = 8M
 index_files = _index.php,index.php,index.html
 
 ;; Remote log ingestion (optional — replaces file access_log for matched domains)
@@ -176,20 +178,20 @@ binary = /usr/local/bin/php-cgi
 
 ;; All HTTP requests → redirect docroot
 [http.*]
-docroot = /var/www/live/ruph_root/ruph_http
+docroot = /var/www/http
 
 ;; www.* over HTTPS → also redirect
 [https.www]
-docroot = /var/www/live/ruph_root/ruph_http
+docroot = /var/www/http
 
 ;; Per-domain HTTPS virtual hosts
 [https.example.com]
-docroot = /var/www/live/ruph_root/example.com
+docroot = /var/www/example.com
 trailhead_owner = example
 
-[https.nyphp.org]
-docroot = /var/www/live/ruph_root/nyphp.org
-trailhead_owner = nyphporg
+[https.example.org]
+docroot = /var/www/example.org
+trailhead_owner = exampleorg
 ```
 
 ## Backward Compatibility

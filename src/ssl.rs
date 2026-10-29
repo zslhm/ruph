@@ -53,7 +53,7 @@ impl ResolvesServerCert for WildcardCertResolver {
             return Some(ck.clone());
         }
 
-        // Wildcard: lists.nyphp.org -> *.nyphp.org
+        // Wildcard: www.example.com -> *.example.com
         if let Some(dot) = sni.find('.') {
             let wildcard = format!("*.{}", &sni[dot + 1..]);
             if let Some(ck) = self.certs.get(&wildcard) {
@@ -228,7 +228,7 @@ pub fn is_covered_by_wildcard(domain: &str, ssl_dir: &Path) -> bool {
         return false;
     }
 
-    // Build wildcard pattern: lists.nyphp.org -> *.nyphp.org
+    // Build wildcard pattern: www.example.com -> *.example.com
     let wildcard = format!("*.{}", parts[1..].join("."));
     let wildcard_dir = ssl_dir.join(&wildcard);
 
